@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 # Copyright 2015 Conchylicultor. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,10 +24,14 @@ import pickle  # Saving the data
 import math  # For float comparison
 import os  # Checking file existance
 import random
-import warnings  # Should be temporary
+import string
+from collections import OrderedDict
 
-from chatbot.cornelldata import CornellData
-
+from chatbot.corpus.cornelldata import CornellData
+from chatbot.corpus.opensubsdata import OpensubsData
+from chatbot.corpus.scotusdata import ScotusData
+from chatbot.corpus.ubuntudata import UbuntuData
+from chatbot.corpus.lightweightdata import LightweightData
 
 class Batch:
     """Struct containing batches info
@@ -45,7 +47,23 @@ class TextData:
     """Dataset class
     Warning: No vocabulary limit
     """
-    
+
+    availableCorpus = OrderedDict([  # OrderedDict because the first element is the default choice
+        ('cornell', CornellData),
+        ('opensubs', OpensubsData),
+        ('scotus', ScotusData),
+        ('ubuntu', UbuntuData),
+        ('lightweight', LightweightData),
+    ])
+
+    @staticmethod
+    def corpusChoices():
+        """Return the dataset availables
+        Return:
+            list<string>: the supported corpus
+        """
+        return list(TextData.availableCorpus.keys())
+
     def __init__(self, args):
         """Load all conversations
         Args:
@@ -55,24 +73,24 @@ class TextData:
         self.args = args
 
         # Path variables
-        self.corpusDir = os.path.join(self.args.rootDir, 'data/cornell/')
+        self.corpusDir = os.path.join(self.args.rootDir, 'data', self.args.corpus)
         self.samplesDir = os.path.join(self.args.rootDir, 'data/samples/')
         self.samplesName = self._constructName()
-        
+
         self.padToken = -1  # Padding
         self.goToken = -1  # Start of sequence
         self.eosToken = -1  # End of sequence
         self.unknownToken = -1  # Word dropped from vocabulary
-        
+
         self.trainingSamples = []  # 2d array containing each question and his answer [[input,target]]
-        
+
         self.word2id = {}
         self.id2word = {}  # For a rapid conversion
-        
+
         self.loadCorpus(self.samplesDir)
 
         # Plot some stats:
-        print('Loaded: {} words, {} QA'.format(len(self.word2id), len(self.trainingSamples)))
+        print('Loaded {}: {} words, {} QA'.format(self.args.corpus, len(self.word2id), len(self.trainingSamples)))
 
         if self.args.playDataset:
             self.playDataset()
@@ -81,23 +99,23 @@ class TextData:
         """Return the name of the dataset that the program should use with the current parameters.
         Computer from the base name, the given tag (self.args.datasetTag) and the sentence length
         """
-        baseName = 'dataset'
+        baseName = 'dataset-{}'.format(self.args.corpus)
         if self.args.datasetTag:
             baseName += '-' + self.args.datasetTag
-        return baseName + '-' + str(self.args.maxLength) + '.pkl'
+        return '{}-{}.pkl'.format(baseName, self.args.maxLength)
 
     def makeLighter(self, ratioDataset):
         """Only keep a small fraction of the dataset, given by the ratio
         """
-        if not math.isclose(ratioDataset, 1.0):
-            self.shuffle()  # Really ?
-            print('WARNING: Ratio feature not implemented !!!')
+        #if not math.isclose(ratioDataset, 1.0):
+        #    self.shuffle()  # Really ?
+        #    print('WARNING: Ratio feature not implemented !!!')
         pass
 
     def shuffle(self):
         """Shuffle the training samples
         """
-        print("Shuffling the dataset...")
+        print('Shuffling the dataset...')
         random.shuffle(self.trainingSamples)
 
     def _createBatch(self, samples):
@@ -120,6 +138,9 @@ class TextData:
             sample = samples[i]
             if not self.args.test and self.args.watsonMode:  # Watson mode: invert question and answer
                 sample = list(reversed(sample))
+            if not self.args.test and self.args.autoEncode:  # Autoencode: use either the question or answer for both input and output
+                k = random.randint(0, 1)
+                sample = (sample[k], sample[k])
             batch.encoderSeqs.append(list(reversed(sample[0])))  # Reverse inputs (and not outputs), little trick as defined on the original seq2seq paper
             batch.decoderSeqs.append([self.goToken] + sample[1] + [self.eosToken])  # Add the <go> and <eos> tokens
             batch.targetSeqs.append(batch.decoderSeqs[-1][1:])  # Same as decoder, but shifted to the left (ignore the <go>)
@@ -129,10 +150,10 @@ class TextData:
             assert len(batch.decoderSeqs[i]) <= self.args.maxLengthDeco
 
             # Add padding & define weight
-            batch.encoderSeqs[i]   = [self.word2id["<pad>"]] * (self.args.maxLengthEnco  - len(batch.encoderSeqs[i])) + batch.encoderSeqs[i]  # Left padding for the input
+            batch.encoderSeqs[i]   = [self.padToken] * (self.args.maxLengthEnco  - len(batch.encoderSeqs[i])) + batch.encoderSeqs[i]  # Left padding for the input
             batch.weights.append([1.0] * len(batch.targetSeqs[i]) + [0.0] * (self.args.maxLengthDeco - len(batch.targetSeqs[i])))
-            batch.decoderSeqs[i] = batch.decoderSeqs[i] + [self.word2id["<pad>"]] * (self.args.maxLengthDeco - len(batch.decoderSeqs[i]))
-            batch.targetSeqs[i]  = batch.targetSeqs[i]  + [self.word2id["<pad>"]] * (self.args.maxLengthDeco - len(batch.targetSeqs[i]))
+            batch.decoderSeqs[i] = batch.decoderSeqs[i] + [self.padToken] * (self.args.maxLengthDeco - len(batch.decoderSeqs[i]))
+            batch.targetSeqs[i]  = batch.targetSeqs[i]  + [self.padToken] * (self.args.maxLengthDeco - len(batch.targetSeqs[i]))
 
         # Simple hack to reshape the batch
         encoderSeqsT = []  # Corrected orientation
@@ -174,7 +195,7 @@ class TextData:
             list<Batch>: Get a list of the batches for the next epoch
         """
         self.shuffle()
-        
+
         batches = []
 
         def genNextSamples():
@@ -187,21 +208,21 @@ class TextData:
             batch = self._createBatch(samples)
             batches.append(batch)
         return batches
-    
+
     def getSampleSize(self):
         """Return the size of the dataset
         Return:
             int: Number of training samples
         """
         return len(self.trainingSamples)
-    
+
     def getVocabularySize(self):
         """Return the number of words present in the dataset
         Return:
             int: Number of word on the loader corpus
         """
         return len(self.word2id)
-        
+
     def loadCorpus(self, dirName):
         """Load/create the conversations data
         Args:
@@ -210,33 +231,40 @@ class TextData:
         datasetExist = False
         if os.path.exists(os.path.join(dirName, self.samplesName)):
             datasetExist = True
-        
+
         if not datasetExist:  # First time we load the database: creating all files
             print('Training samples not found. Creating dataset...')
+
+            optionnal = ''
+            if self.args.corpus == 'lightweight' and not self.args.datasetTag:
+                raise ValueError('Use the --datasetTag to define the lightweight file to use.')
+            else:
+                optionnal = '/' + self.args.datasetTag  # HACK: Forward the filename
+
             # Corpus creation
-            cornellData = CornellData(self.corpusDir)
-            self.createCorpus(cornellData.getConversations())
-            
+            corpusData = TextData.availableCorpus[self.args.corpus](self.corpusDir + optionnal)
+            self.createCorpus(corpusData.getConversations())
+
             # Saving
             print('Saving dataset...')
             self.saveDataset(dirName)  # Saving tf samples
         else:
             print('Loading dataset from {}...'.format(dirName))
             self.loadDataset(dirName)
-        
+
         assert self.padToken == 0
-        
+
     def saveDataset(self, dirName):
         """Save samples to file
         Args:
             dirName (str): The directory where to load/save the model
         """
-        
+
         with open(os.path.join(dirName, self.samplesName), 'wb') as handle:
             data = {  # Warning: If adding something here, also modifying loadDataset
-                "word2id": self.word2id,
-                "id2word": self.id2word,
-                "trainingSamples": self.trainingSamples
+                'word2id': self.word2id,
+                'id2word': self.id2word,
+                'trainingSamples': self.trainingSamples
                 }
             pickle.dump(data, handle, -1)  # Using the highest protocol available
 
@@ -247,27 +275,27 @@ class TextData:
         """
         with open(os.path.join(dirName, self.samplesName), 'rb') as handle:
             data = pickle.load(handle)  # Warning: If adding something here, also modifying saveDataset
-            self.word2id = data["word2id"]
-            self.id2word = data["id2word"]
-            self.trainingSamples = data["trainingSamples"]
-            
-            self.padToken = self.word2id["<pad>"]
-            self.goToken = self.word2id["<go>"]
-            self.eosToken = self.word2id["<eos>"]
-            self.unknownToken = self.word2id["<unknown>"]  # Restore special words
+            self.word2id = data['word2id']
+            self.id2word = data['id2word']
+            self.trainingSamples = data['trainingSamples']
+
+            self.padToken = self.word2id['<pad>']
+            self.goToken = self.word2id['<go>']
+            self.eosToken = self.word2id['<eos>']
+            self.unknownToken = self.word2id['<unknown>']  # Restore special words
 
     def createCorpus(self, conversations):
         """Extract all data from the given vocabulary
         """
         # Add standard tokens
-        self.padToken = self.getWordId("<pad>")  # Padding (Warning: first things to add > id=0 !!)
-        self.goToken = self.getWordId("<go>")  # Start of sequence
-        self.eosToken = self.getWordId("<eos>")  # End of sequence
-        self.unknownToken = self.getWordId("<unknown>")  # Word dropped from vocabulary
-        
+        self.padToken = self.getWordId('<pad>')  # Padding (Warning: first things to add > id=0 !!)
+        self.goToken = self.getWordId('<go>')  # Start of sequence
+        self.eosToken = self.getWordId('<eos>')  # End of sequence
+        self.unknownToken = self.getWordId('<unknown>')  # Word dropped from vocabulary
+
         # Preprocessing data
 
-        for conversation in tqdm(conversations, desc="Extract conversations"):
+        for conversation in tqdm(conversations, desc='Extract conversations'):
             self.extractConversation(conversation)
 
         # The dataset will be saved in the same order it has been extracted
@@ -275,17 +303,18 @@ class TextData:
     def extractConversation(self, conversation):
         """Extract the sample lines from the conversations
         Args:
-            conversation (Obj): a convesation object containing the lines to extract
+            conversation (Obj): a conversation object containing the lines to extract
         """
-            
+
         # Iterate over all the lines of the conversation
-        for i in range(len(conversation["lines"]) - 1):  # We ignore the last line (no answer for it)
-            inputLine  = conversation["lines"][i]
-            targetLine = conversation["lines"][i+1]
-            
-            inputWords  = self.extractText(inputLine["text"])
-            targetWords = self.extractText(targetLine["text"], True)
-            
+        for i in tqdm_wrap(range(len(conversation['lines']) - 1),  # We ignore the last line (no answer for it)
+                           desc='Conversation', leave=False):
+            inputLine  = conversation['lines'][i]
+            targetLine = conversation['lines'][i+1]
+
+            inputWords  = self.extractText(inputLine['text'])
+            targetWords = self.extractText(targetLine['text'], True)
+
             if inputWords and targetWords:  # Filter wrong samples (if one of the list is empty)
                 self.trainingSamples.append([inputWords, targetWords])
 
@@ -341,7 +370,7 @@ class TextData:
 
         # Get the id if the word already exist
         wordId = self.word2id.get(word, -1)
-        
+
         # If not, we create a new entry
         if wordId == -1:
             if create:
@@ -350,7 +379,7 @@ class TextData:
                 self.id2word[wordId] = word
             else:
                 wordId = self.unknownToken
-        
+
         return wordId
 
     def printBatch(self, batch):
@@ -391,7 +420,20 @@ class TextData:
         if reverse:  # Reverse means input so no <eos> (otherwise pb with previous early stop)
             sentence.reverse()
 
-        return ' '.join(sentence)
+        return self.detokenize(sentence)
+
+    def detokenize(self, tokens):
+        """Slightly cleaner version of joining with spaces.
+        Args:
+            tokens (list<string>): the sentence to print
+        Return:
+            str: the sentence
+        """
+        return ''.join([
+            ' ' + t if not t.startswith('\'') and
+                       t not in string.punctuation
+                    else t
+            for t in tokens]).strip().capitalize()
 
     def batchSeq2str(self, batchSeq, seqId=0, **kwargs):
         """Convert a list of integer into a human readable string.
@@ -450,8 +492,22 @@ class TextData:
         """
         print('Randomly play samples:')
         for i in range(self.args.playDataset):
-            idSample = random.randint(0, len(self.trainingSamples))
-            print('Q: {}'.format(self.sequence2str(self.trainingSamples[idSample][0])))
-            print('A: {}'.format(self.sequence2str(self.trainingSamples[idSample][1])))
+            idSample = random.randint(0, len(self.trainingSamples) - 1)
+            print('Q: {}'.format(self.sequence2str(self.trainingSamples[idSample][0], clean=True)))
+            print('A: {}'.format(self.sequence2str(self.trainingSamples[idSample][1], clean=True)))
             print()
         pass
+
+
+def tqdm_wrap(iterable, *args, **kwargs):
+    """Forward an iterable eventually wrapped around a tqdm decorator
+    The iterable is only wrapped if the iterable contains enough elements
+    Args:
+        iterable (list): An iterable object which define the __len__ method
+        *args, **kwargs: the tqdm parameters
+    Return:
+        iter: The iterable eventually decorated
+    """
+    if len(iterable) > 100:
+        return tqdm(iterable, *args, **kwargs)
+    return iterable
