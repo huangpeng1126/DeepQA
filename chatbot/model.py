@@ -41,7 +41,7 @@ class ProjectionOp:
 
         # Projection on the keyboard
         with tf.variable_scope('weights_' + self.scope):
-            self.W = tf.get_variable(
+            self.W_t = tf.get_variable(
                 'weights',
                 shape,
                 # initializer=tf.truncated_normal_initializer()  # TODO: Tune value (fct of input size: 1/sqrt(input_dim))
@@ -49,10 +49,11 @@ class ProjectionOp:
             )
             self.b = tf.get_variable(
                 'bias',
-                shape[1],
+                shape[0],
                 initializer=tf.constant_initializer(),
                 dtype=dtype
             )
+            self.W = tf.transpose(self.W_t)
 
     def getWeights(self):
         """ Convenience method for some tf arguments
@@ -114,17 +115,17 @@ class Model:
         # Sampled softmax only makes sense if we sample less than vocabulary size.
         if 0 < self.args.softmaxSamples < self.textData.getVocabularySize():
             outputProjection = ProjectionOp(
-                (self.args.hiddenSize, self.textData.getVocabularySize()),
+                (self.textData.getVocabularySize(), self.args.hiddenSize),
                 scope='softmax_projection',
                 dtype=self.dtype
             )
 
-            def sampledSoftmax(inputs, labels):
+            def sampledSoftmax(labels, inputs):
                 labels = tf.reshape(labels, [-1, 1])  # Add one dimension (nb of true classes, here 1)
 
                 # We need to compute the sampled_softmax_loss using 32bit floats to
                 # avoid numerical instabilities.
-                localWt     = tf.cast(tf.transpose(outputProjection.W), tf.float32)
+                localWt     = tf.cast(outputProjection.W_t,             tf.float32)
                 localB      = tf.cast(outputProjection.b,               tf.float32)
                 localInputs = tf.cast(inputs,                           tf.float32)
 
@@ -132,17 +133,27 @@ class Model:
                     tf.nn.sampled_softmax_loss(
                         localWt,  # Should have shape [num_classes, dim]
                         localB,
-                        localInputs,
                         labels,
+                        localInputs,
                         self.args.softmaxSamples,  # The number of classes to randomly sample per batch
                         self.textData.getVocabularySize()),  # The number of classes
                     self.dtype)
 
         # Creation of the rnn cell
-        encoDecoCell = tf.contrib.rnn.BasicLSTMCell(self.args.hiddenSize, state_is_tuple=True)  # Or GRUCell, LSTMCell(args.hiddenSize)
-        if not self.args.test:  # TODO: Should use a placeholder instead
-            encoDecoCell = tf.contrib.rnn.DropoutWrapper(encoDecoCell, input_keep_prob=1.0, output_keep_prob=0.9)  # TODO: Custom values
-        encoDecoCell = tf.contrib.rnn.MultiRNNCell([encoDecoCell] * self.args.numLayers, state_is_tuple=True)
+        def create_rnn_cell():
+            encoDecoCell = tf.contrib.rnn.BasicLSTMCell(  # Or GRUCell, LSTMCell(args.hiddenSize)
+                self.args.hiddenSize,
+            )
+            if not self.args.test:  # TODO: Should use a placeholder instead
+                encoDecoCell = tf.contrib.rnn.DropoutWrapper(
+                    encoDecoCell,
+                    input_keep_prob=1.0,
+                    output_keep_prob=self.args.dropout
+                )
+            return encoDecoCell
+        encoDecoCell = tf.contrib.rnn.MultiRNNCell(
+            [create_rnn_cell() for _ in range(self.args.numLayers)],
+        )
 
         # Network input (placeholders)
 
